@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAIStream, StreamingTextResponse } from 'ai';
 
 interface LegalDocument {
   nombre_ley: string;
@@ -18,38 +19,85 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 export async function POST(req: Request) {
   try {
-    const { message } = await req.json();
+    // Vercel AI SDK envía la propiedad 'messages'
+    const { messages } = await req.json();
+    const lastMessage = messages?.[messages.length - 1];
 
-    if (!message) {
+    if (!lastMessage || !lastMessage.content) {
       return NextResponse.json({ error: "Falta el mensaje" }, { status: 400 });
     }
+    
+    const message = lastMessage.content;
 
     // 2. Generar el embedding de la pregunta del usuario
     const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
     const embeddingResult = await embeddingModel.embedContent(message);
     const queryEmbedding = embeddingResult.embedding.values;
 
-    // 3. Buscar en Supabase usando la función RPC que creamos en SQL
-    const { data: documentsData, error } = await supabase.rpc('match_legal_documents', {
-      query_embedding: queryEmbedding,
-      match_threshold: 0.5, // Qué tan estricta es la similitud (0.5 es un buen punto de partida)
-      match_count: 5        // Obtenemos un poco extra para hacer reranking en memoria
-    });
+    // 3. Evaluar Caché Semántico y RAG de forma Paralela
+    const cachePromise = (async () => {
+      try {
+        return await supabase.rpc('match_query_cache', {
+          query_embedding: queryEmbedding,
+          match_threshold: 0.95
+        });
+      } catch (err: any) {
+        console.error("Error silencioso buscando en query_cache:", err?.message || err);
+        return { data: null, error: err };
+      }
+    })();
 
-    if (error) throw error;
+    const [cacheResponse, ragResponse] = await Promise.all([
+      cachePromise,
+      supabase.rpc('match_legal_documents', {
+        query_embedding: queryEmbedding,
+        match_threshold: 0.5, 
+        match_count: 5
+      })
+    ]);
 
-    // Reranking Simulado: Seleccionamos solo los 3 mejores para pasarlos al prompt y omitimos el resto
-    const documents = documentsData ? documentsData.slice(0, 3) : [];
+    // 4. CACHE HIT: Devolución inmediata sin IA (0ms latencia)
+    if (cacheResponse.data && cacheResponse.data.length > 0) {
+      console.log('Cache HIT: usando respuesta guardada');
+      const cacheHit = cacheResponse.data[0];
+      
+      // Envolvemos el string cacheado en un Stream nativo para que useChat no falle
+      const stream = new ReadableStream({
+        async start(controller) {
+          // Protocolo Vercel AI SDK DataStream: 0:"texto"
+          const chunk = `0:${JSON.stringify(cacheHit.response_text)}\n`;
+          controller.enqueue(new TextEncoder().encode(chunk));
+          
+          // Delay de micro-tick para evitar que el stream termine instantáneamente
+          // y le de tiempo al loop de React para acoplar los eventos.
+          await new Promise(r => setTimeout(r, 50));
+          
+          controller.close();
+        }
+      });
 
-    if (error) throw error;
+      return new StreamingTextResponse(stream, {
+        headers: { 
+          'Content-Type': 'text/plain; charset=utf-8',
+          'x-sources': encodeURIComponent(JSON.stringify(cacheHit.sources || [])) 
+        }
+      });
+    }
 
-    // 4. Construir el contexto para Gemini
+    // 5. CACHE MISS: Procesar la búsqueda (RAG normal)
+    console.log('Cache MISS: llamando a Gemini');
+    if (ragResponse.error) throw ragResponse.error;
+
+    // Reranking Simulado: Seleccionamos solo los 3 mejores y descartamos metadata extraña
+    const documentsData = ragResponse.data || [];
+    const documents = documentsData.slice(0, 3);
+
     let contextText = "";
     let sources: any[] = [];
 
-    if (documents && documents.length > 0) {
+    if (documents.length > 0) {
+      // Optimizamos enviando un contexto super limpio de tokens innecesarios
       contextText = documents.map((doc: LegalDocument) => `Ley: ${doc.nombre_ley} | Artículo: ${doc.articulo}\nContenido: ${doc.contenido}`).join('\n\n');
-      // Guardamos las fuentes para mostrarlas en la UI
       sources = documents.map((doc: LegalDocument) => ({
         ley: doc.nombre_ley,
         articulo: doc.articulo,
@@ -59,7 +107,7 @@ export async function POST(req: Request) {
       contextText = "No se encontró información legal relevante en la base de datos para esta consulta.";
     }
 
-    // 5. Configurar Gemini 1.5 Flash con el System Prompt
+    // 6. Configurar modelo con System Prompt
     const chatModel = genAI.getGenerativeModel({
       model: "gemini-2.5-flash",
       systemInstruction: `Rol: Eres Directum, un asesor legal digital experto en derecho laboral chileno. Tono profesional, preciso, pedagógico y empático. Cero lenguaje informal (nada de "pega", "oye", "¿ya?").
@@ -70,26 +118,46 @@ Discriminación: Ignora el contexto proporcionado que no responda directamente a
 Disclaimer: Termina siempre con una nota breve en cursiva indicando que es información orientativa, no asesoría legal formal.`
     });
 
-    // 6. Generar la respuesta
     const prompt = `Contexto legal encontrado:\n${contextText}\n\nPregunta del usuario: ${message}`;
-    const result = await chatModel.generateContent(prompt);
-    const responseText = result.response.text();
+    
+    // 7. Solicitar el Stream desde Gemini
+    const geminiStream = await chatModel.generateContentStream(prompt);
 
-    // 7. Devolver la respuesta y las fuentes al Frontend
-    return NextResponse.json({
-      text: responseText,
-      sources: sources
+    // 8. Transformar al formato Vercel AI e interceptar el final para registrar en Caché
+    const stream = GoogleGenerativeAIStream(geminiStream, {
+      onCompletion: async (completion: string) => {
+        try {
+          const { error } = await supabase.from('query_cache').insert({
+            query_text: message,
+            embedding: queryEmbedding,
+            response_text: completion,
+            sources: sources
+          });
+          
+          if (error) {
+            console.error("Error al guardar en query_cache:", error.message || error);
+          } else {
+            console.log("Insert en query_cache finalizado exitosamente.");
+          }
+        } catch (e) {
+          console.error("Excepción inesperada en onCompletion:", e);
+        }
+      }
+    });
+
+    // 9. Devolver el Stream transmitiendo las Fuentes Legales mediante el Header (Codificado UTF-8 seguro)
+    return new StreamingTextResponse(stream, {
+      headers: {
+        'x-sources': encodeURIComponent(JSON.stringify(sources))
+      }
     });
 
   } catch (error: unknown) {
-    console.error("Error en el RAG:", error);
-    
-    // Capturamos el error 429 de la API
+    console.error("Error en RAG/Streaming:", error);
     const err = error as any;
     if (err?.status === 429 || err?.message?.includes('429') || err?.message?.includes('Too Many Requests')) {
       return NextResponse.json({ error: "Estamos recibiendo muchas consultas en este momento. Por favor, espera un minuto y vuelve a intentarlo." }, { status: 429 });
     }
-
     return NextResponse.json({ error: "Hubo un error al procesar tu consulta legal." }, { status: 500 });
   }
 }

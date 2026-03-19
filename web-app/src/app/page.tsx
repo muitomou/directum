@@ -4,12 +4,7 @@ import { useState } from 'react';
 import { Send, Scale, Loader2, AlertCircle } from 'lucide-react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-
-type Message = {
-  role: 'user' | 'ai';
-  content: string;
-  sources?: { ley: string; articulo: string; norma_id?: string }[];
-};
+import { useChat, Message } from 'ai/react';
 
 const markdownComponents: Components = {
   p: ({ node, ...props }) => <p className="mb-3 last:mb-0" {...props} />,
@@ -21,52 +16,69 @@ const markdownComponents: Components = {
 };
 
 export default function Home() {
-  const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'ai', content: '¡Hola! Soy Directum. ¿Tienes alguna duda sobre tus derechos laborales o como consumidor hoy?' }
-  ]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [globalSources, setGlobalSources] = useState<any[][]>([]);
   const [rateLimited, setRateLimited] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
-  const sendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || isLoading) return;
-
-    const userMsg = input.trim();
-    setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
-    setIsLoading(true);
-
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMsg }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        if (res.status === 429 || res.status === 403) {
-          setRateLimited(true);
-          setTimeout(() => setRateLimited(false), 5000);
-          setMessages(prev => [...prev, { role: 'ai', content: 'Estamos recibiendo muchas consultas en este momento. Por favor, espera un minuto y vuelve a intentarlo.' }]);
-          return;
-        }
-        throw new Error(data.error);
+  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
+    api: '/api/chat',
+    initialMessages: [
+      { id: 'welcome', role: 'assistant', content: '¡Hola! Soy Directum. ¿Tienes alguna duda sobre tus derechos laborales o como consumidor hoy?' }
+    ],
+    onResponse: (response: Response) => {
+      // Borrar texto de estado dinámico porque el chunk / cache-hit ha llegado
+      setStatusMsg(null); 
+      
+      if (response.status === 429 || response.status === 403) {
+        setRateLimited(true);
+        setTimeout(() => setRateLimited(false), 5000);
       }
 
-      setMessages(prev => [...prev, { 
-        role: 'ai', 
-        content: data.text,
-        sources: data.sources 
-      }]);
-    } catch {
-      setMessages(prev => [...prev, { role: 'ai', content: 'Ups, tuve un problema conectando con la base legal. Intenta de nuevo.' }]);
-    } finally {
-      setIsLoading(false);
+      // Interceptar Fuentes enviadas codificadas desde el backend
+      const xSources = response.headers.get('x-sources');
+      if (xSources) {
+        try {
+          const parsed = JSON.parse(decodeURIComponent(xSources));
+          setGlobalSources(prev => [...prev, parsed]);
+        } catch (e) {
+          console.error("Error parseando x-sources");
+        }
+      } else {
+        setGlobalSources(prev => [...prev, []]);
+      }
     }
+  });
+
+  const onSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    if (!input.trim() || isLoading) {
+      e.preventDefault();
+      return;
+    }
+    
+    // Secuencia de estatus dinámico para mejorar la UX y percepción de velocidad
+    setStatusMsg("Generando embedding...");
+    
+    setTimeout(() => {
+      setStatusMsg(prev => prev ? "Consultando base de datos legal..." : null);
+    }, 600);
+    
+    setTimeout(() => {
+      setStatusMsg(prev => prev ? "Redactando respuesta..." : null);
+    }, 1500);
+
+    handleSubmit(e);
   };
+
+  // Modern Skeleton Screen
+  const SkeletonLoader = () => (
+    <div className="flex justify-start animate-pulse">
+      <div className="max-w-[85%] rounded-2xl p-4 bg-white border border-slate-200 shadow-sm rounded-tl-sm w-[280px] space-y-4">
+        <div className="h-3 bg-slate-200 rounded-full w-3/4"></div>
+        <div className="h-3 bg-slate-200 rounded-full w-full"></div>
+        <div className="h-3 bg-slate-200 rounded-full w-5/6"></div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 font-sans relative">
@@ -91,76 +103,91 @@ export default function Home() {
       {/* Chat Container */}
       <div className="w-full max-w-3xl bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[70vh]">
         
-        {/* Messages Area */}
+        {/* Messages */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {messages.map((msg, i) => (
-            <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] rounded-2xl p-4 ${
-                msg.role === 'user' 
-                  ? 'bg-blue-600 text-white rounded-tr-sm' 
-                  : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm shadow-sm'
-              }`}>
-                
-                {msg.role === 'user' ? (
-                  <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-                ) : (
-                  <div className="text-[15px] leading-relaxed text-slate-700">
-                    <ReactMarkdown 
-                      remarkPlugins={[remarkGfm]}
-                      components={markdownComponents}
-                    >
-                      {msg.content}
-                    </ReactMarkdown>
-                  </div>
-                )}
-                
-                {/* Fuentes Legales (Chips Clickeables BCN) */}
-                {msg.role === 'ai' && msg.sources && msg.sources.length > 0 && (
-                  <div className="mt-4 pt-3 border-t border-slate-200">
-                    <p className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider flex items-center gap-1">
-                      <AlertCircle size={12} /> Fuentes consultadas:
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {msg.sources.map((source, idx) => {
-                        const bcnUrl = source.norma_id 
-                          ? `https://www.bcn.cl/leychile/navegar?idNorma=${source.norma_id}`
-                          : '#';
-                        return (
-                          <a 
-                            key={idx} 
-                            href={bcnUrl}
-                            target={source.norma_id ? "_blank" : "_self"}
-                            rel={source.norma_id ? "noopener noreferrer" : ""}
-                            className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-medium bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 shadow-sm transition-colors cursor-pointer"
-                          >
-                            📄 {source.ley} - {source.articulo}
-                          </a>
-                        );
-                      })}
+          {messages.map((msg: Message, idx: number) => {
+            const isUser = msg.role === 'user';
+            
+            // Calculamos indices excluyendo el initialMessage predefinido para parear las sources
+            const aiIndex = isUser ? -1 : messages.slice(0, idx + 1).filter((m: Message) => m.role === 'assistant').length - 2;  
+            const sources = aiIndex >= 0 ? globalSources[aiIndex] : null;
+
+            return (
+              <div key={msg.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[85%] rounded-2xl p-4 ${
+                  isUser 
+                    ? 'bg-blue-600 text-white rounded-tr-sm' 
+                    : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm shadow-sm'
+                }`}>
+                  
+                  {isUser ? (
+                    <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                  ) : (
+                    <div className="text-[15px] leading-relaxed text-slate-700">
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm]}
+                        components={markdownComponents}
+                      >
+                        {msg.content}
+                      </ReactMarkdown>
                     </div>
-                  </div>
-                )}
+                  )}
+                  
+                  {/* Fuentes Legales (Chips Clickeables BCN) */}
+                  {!isUser && sources && sources.length > 0 && (
+                    <div className="mt-4 pt-3 border-t border-slate-200">
+                      <p className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider flex items-center gap-1">
+                        <AlertCircle size={12} /> Fuentes consultadas:
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {sources.map((source: any, sIdx: number) => {
+                          const bcnUrl = source.norma_id 
+                            ? `https://www.bcn.cl/leychile/navegar?idNorma=${source.norma_id}`
+                            : '#';
+                          return (
+                            <a 
+                              key={sIdx} 
+                              href={bcnUrl}
+                              target={source.norma_id ? "_blank" : "_self"}
+                              rel={source.norma_id ? "noopener noreferrer" : ""}
+                              className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-medium bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 shadow-sm transition-colors cursor-pointer"
+                            >
+                              📄 {source.ley} - {source.articulo}
+                            </a>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-          {isLoading && (
-            <div className="flex justify-start">
-              <div className="bg-slate-100 rounded-2xl rounded-tl-sm p-4 text-slate-500 flex items-center gap-2">
-                <Loader2 size={18} className="animate-spin text-blue-600" /> Consultando la BCN...
-              </div>
+            );
+          })}
+          
+          {/* Skeleton de 3 líneas (Vercel UX) + UI Dinámico */}
+          {isLoading && messages[messages.length - 1]?.role === 'user' && (
+            <div className="space-y-3">
+              {statusMsg && (
+                <div className="flex justify-start ml-2">
+                  <p className="text-xs text-slate-400 flex items-center gap-1.5 font-medium animate-pulse">
+                     <Loader2 size={12} className="animate-spin" /> {statusMsg}
+                  </p>
+                </div>
+              )}
+              <SkeletonLoader />
             </div>
           )}
         </div>
 
         {/* Input Area */}
         <div className="p-4 bg-white border-t border-slate-100">
-          <form onSubmit={sendMessage} className="relative flex items-center">
+          <form onSubmit={onSubmit} className="relative flex items-center">
             <input
               type="text"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={handleInputChange}
               placeholder="Ej: ¿Me pueden obligar a trabajar feriado?"
-              className="w-full pl-5 pr-14 py-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-slate-700"
+              className="w-full pl-5 pr-14 py-4 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-slate-700 disabled:opacity-50"
               disabled={isLoading}
             />
             <button
