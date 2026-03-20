@@ -85,7 +85,8 @@ export async function POST(req: Request) {
       return new StreamingTextResponse(stream, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
-          'x-sources': encodeURIComponent(JSON.stringify(cacheHit.sources || []))
+          'x-sources': encodeURIComponent(JSON.stringify(cacheHit.sources || [])),
+          'Access-Control-Expose-Headers': 'x-sources'
         }
       });
     }
@@ -155,7 +156,8 @@ Disclaimer: Termina siempre con una nota breve en cursiva indicando que es infor
     // 9. Devolver el Stream transmitiendo las Fuentes Legales mediante el Header (Codificado UTF-8 seguro)
     return new StreamingTextResponse(stream, {
       headers: {
-        'x-sources': encodeURIComponent(JSON.stringify(sources))
+        'x-sources': encodeURIComponent(JSON.stringify(sources)),
+        'Access-Control-Expose-Headers': 'x-sources'
       }
     });
 
