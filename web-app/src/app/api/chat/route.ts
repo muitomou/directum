@@ -26,12 +26,13 @@ export async function POST(req: Request) {
     if (!lastMessage || !lastMessage.content) {
       return NextResponse.json({ error: "Falta el mensaje" }, { status: 400 });
     }
-    
+
     const message = lastMessage.content;
 
-    // 2. Generar el embedding de la pregunta del usuario
+    // 2. Generar el embedding de la pregunta del usuario (Normalizado para Caché)
+    const normalizedMessage = message.trim().toLowerCase();
     const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
-    const embeddingResult = await embeddingModel.embedContent(message);
+    const embeddingResult = await embeddingModel.embedContent(normalizedMessage);
     const queryEmbedding = embeddingResult.embedding.values;
 
     // 3. Evaluar Caché Semántico y RAG de forma Paralela
@@ -39,7 +40,7 @@ export async function POST(req: Request) {
       try {
         return await supabase.rpc('match_query_cache', {
           query_embedding: queryEmbedding,
-          match_threshold: 0.95
+          match_threshold: 0.85
         });
       } catch (err: any) {
         console.error("Error silencioso buscando en query_cache:", err?.message || err);
@@ -51,35 +52,36 @@ export async function POST(req: Request) {
       cachePromise,
       supabase.rpc('match_legal_documents', {
         query_embedding: queryEmbedding,
-        match_threshold: 0.5, 
+        match_threshold: 0.5,
         match_count: 5
       })
     ]);
 
     // 4. CACHE HIT: Devolución inmediata sin IA (0ms latencia)
     if (cacheResponse.data && cacheResponse.data.length > 0) {
-      console.log('Cache HIT: usando respuesta guardada');
       const cacheHit = cacheResponse.data[0];
-      
+      console.log('Cache HIT: usando respuesta guardada');
+      console.log('Similitud detectada:', cacheHit.similarity);
+
       // Envolvemos el string cacheado en un Stream nativo para que useChat no falle
       const stream = new ReadableStream({
         async start(controller) {
           // Protocolo Vercel AI SDK DataStream: 0:"texto"
           const chunk = `0:${JSON.stringify(cacheHit.response_text)}\n`;
           controller.enqueue(new TextEncoder().encode(chunk));
-          
+
           // Delay de micro-tick para evitar que el stream termine instantáneamente
           // y le de tiempo al loop de React para acoplar los eventos.
           await new Promise(r => setTimeout(r, 50));
-          
+
           controller.close();
         }
       });
 
       return new StreamingTextResponse(stream, {
-        headers: { 
+        headers: {
           'Content-Type': 'text/plain; charset=utf-8',
-          'x-sources': encodeURIComponent(JSON.stringify(cacheHit.sources || [])) 
+          'x-sources': encodeURIComponent(JSON.stringify(cacheHit.sources || []))
         }
       });
     }
@@ -119,7 +121,7 @@ Disclaimer: Termina siempre con una nota breve en cursiva indicando que es infor
     });
 
     const prompt = `Contexto legal encontrado:\n${contextText}\n\nPregunta del usuario: ${message}`;
-    
+
     // 7. Solicitar el Stream desde Gemini
     const geminiStream = await chatModel.generateContentStream(prompt);
 
@@ -133,7 +135,7 @@ Disclaimer: Termina siempre con una nota breve en cursiva indicando que es infor
             response_text: completion,
             sources: sources
           });
-          
+
           if (error) {
             console.error("Error al guardar en query_cache:", error.message || error);
           } else {
