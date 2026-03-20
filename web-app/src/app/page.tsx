@@ -141,7 +141,9 @@ export default function Home() {
                       </p>
                       <div className="flex flex-wrap gap-2">
                         {sources.map((source: any, sIdx: number) => {
-                          const bcnUrl = source.norma_id 
+                          const bcnUrl = source.norma_id && source.id_parte_bcn 
+                            ? `https://www.bcn.cl/leychile/navegar?idNorma=${source.norma_id}&idParte=${source.id_parte_bcn}`
+                            : source.norma_id
                             ? `https://www.bcn.cl/leychile/navegar?idNorma=${source.norma_id}`
                             : '#';
                           return (

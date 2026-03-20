@@ -8,6 +8,7 @@ interface LegalDocument {
   articulo: string;
   contenido: string;
   norma_id: string;
+  id_parte_bcn?: string;
 }
 
 // 1. Inicializar clientes con las variables de entorno
@@ -103,7 +104,8 @@ export async function POST(req: Request) {
       sources = documents.map((doc: LegalDocument) => ({
         ley: doc.nombre_ley,
         articulo: doc.articulo,
-        norma_id: doc.norma_id
+        norma_id: doc.norma_id,
+        id_parte_bcn: doc.id_parte_bcn
       }));
     } else {
       contextText = "No se encontró información legal relevante en la base de datos para esta consulta.";
