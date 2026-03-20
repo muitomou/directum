@@ -1,3 +1,6 @@
+export const maxDuration = 60; // Optimización Vercel AI
+export const dynamic = 'force-dynamic'; // Evita el cacheo agresivo de fetch() en Producción Vercel
+
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
