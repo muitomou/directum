@@ -117,7 +117,7 @@ export async function POST(req: Request) {
 
     // 6. Configurar modelo con System Prompt
     const chatModel = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.5-flash",
       systemInstruction: `Rol: Eres Directum, un asesor legal digital experto en derecho laboral chileno. Tono profesional, preciso, pedagógico y empático. Cero lenguaje informal (nada de "pega", "oye", "¿ya?").
 Concisión Máxima: Las respuestas deben ser MUY cortas, directas y al grano. Pensadas para una lectura rápida en móvil.
 Estructura: 1. Regla general (breve). 2. Excepciones (en bullet points). 3. Conclusión/Paso a seguir.
